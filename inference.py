@@ -19,7 +19,7 @@ if __name__=="__main__":
         pvd.nvs_single_view()
 
     elif opts.mode == 'single_view_txt':
-        pvd.nvs_single_view()
+        pvd.nvs_single_view_w_ctrl()#nvs_single_view()
 
     elif opts.mode == 'single_view_eval':
         pvd.nvs_single_view_eval()

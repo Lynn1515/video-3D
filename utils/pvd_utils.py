@@ -289,7 +289,7 @@ def generate_traj_specified(c2ws_anchor,H,W,fs,c,theta, phi,d_r,d_x,d_y,frame,de
     cameras = PerspectiveCameras(focal_length=fs, principal_point=c, in_ndc=False, image_size=image_size, R=R_new, T=T_new, device=device)
     return cameras,num_views
 
-def generate_traj_txt(c2ws_anchor,H,W,fs,c,phi, theta, r,frame,device,viz_traj=False, save_dir = None):
+def generate_traj_txt(c2ws_anchor, H, W, fs, c, phi, theta, r, frame,device,viz_traj=False, save_dir = None):
     # Initialize a camera.
     """
     The camera coordinate sysmte in COLMAP is right-down-forward
@@ -341,6 +341,89 @@ def generate_traj_txt(c2ws_anchor,H,W,fs,c,phi, theta, r,frame,device,viz_traj=F
     image_size = ((H, W),)  # (h, w)
     cameras = PerspectiveCameras(focal_length=fs, principal_point=c, in_ndc=False, image_size=image_size, R=R_new, T=T_new, device=device)
     return cameras,num_views
+
+def generate_dual_traj_txt(
+    c2ws_anchor, H, W, fs, c,
+    phi, theta, r,
+    frame, device,
+    viz_traj=False, save_dir=None
+):
+    """
+    Generate two camera trajectories:
+    - The original trajectory
+    - A slightly perturbed trajectory near the original one
+    """
+
+    def interp(values):
+        if len(values) > 3:
+            out = txt_interpolation(values, frame, mode='smooth')
+            out[0], out[-1] = values[0], values[-1]
+        else:
+            out = txt_interpolation(values, frame, mode='linear')
+        return out
+
+    # Interpolate original inputs
+    phis = interp(phi)
+    thetas = interp(theta)
+    rs = interp(r)
+    rs = rs * c2ws_anchor[0, 2, 3].cpu().numpy()
+
+    # Generate perturbed versions (small Gaussian noise)
+    perturb_std_phi = 2.0
+    perturb_std_theta = 2.0
+    perturb_std_r = 0.01 * c2ws_anchor[0, 2, 3].cpu().numpy()
+
+    phis_perturbed = phis + np.random.normal(scale=perturb_std_phi, size=len(phis))
+    thetas_perturbed = thetas + np.random.normal(scale=perturb_std_theta, size=len(thetas))
+    rs_perturbed = rs + np.random.normal(scale=perturb_std_r, size=len(rs))
+
+    # Function to build pose list
+    def build_c2ws(theta_list, phi_list, r_list):
+        c2ws_list = []
+        for th, ph, r_val in zip(theta_list, phi_list, r_list):
+            c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), np.float32(r_val), device)
+            c2ws_list.append(c2w_new)
+        return torch.cat(c2ws_list, dim=0)
+
+    # Original and perturbed pose matrices
+    c2ws_orig = build_c2ws(thetas, phis, rs)
+    c2ws_perturb = build_c2ws(thetas_perturbed, phis_perturbed, rs_perturbed)
+
+    def convert_to_camera(c2ws):
+        R, T = c2ws[:, :3, :3], c2ws[:, :3, 3:]
+        R = torch.stack([-R[:, :, 0], -R[:, :, 1], R[:, :, 2]], 2)  # RDF -> LUF
+        new_c2w = torch.cat([R, T], 2)
+        w2c = torch.linalg.inv(torch.cat(
+            (new_c2w, torch.Tensor([[[0, 0, 0, 1]]]).to(device).repeat(new_c2w.shape[0], 1, 1)), 1
+        ))
+        R_new, T_new = w2c[:, :3, :3].permute(0, 2, 1), w2c[:, :3, 3]
+        image_size = ((H, W),)
+        return PerspectiveCameras(
+            focal_length=fs,
+            principal_point=c,
+            in_ndc=False,
+            image_size=image_size,
+            R=R_new,
+            T=T_new,
+            device=device
+        )
+
+    # Construct both camera trajectories
+    cameras1 = convert_to_camera(c2ws_orig)
+    cameras2 = convert_to_camera(c2ws_perturb)
+
+    if viz_traj and save_dir is not None:
+        poses1 = c2ws_orig.cpu().numpy()
+        poses2 = c2ws_perturb.cpu().numpy()
+
+        frames1 = [visualizer_frame(poses1, i) for i in range(len(poses1))]
+        save_video(np.array(frames1) / 255., os.path.join(save_dir, 'viz_traj_orig.mp4'))
+
+        frames2 = [visualizer_frame(poses2, i) for i in range(len(poses2))]
+        save_video(np.array(frames2) / 255., os.path.join(save_dir, 'viz_traj_perturb.mp4'))
+
+    num_views = c2ws_orig.shape[0]
+    return cameras1, cameras2, num_views
 
 def setup_renderer(cameras, image_size):
     # Define the settings for rasterization and shading.

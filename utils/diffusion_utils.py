@@ -8,6 +8,8 @@ import os
 from lvdm.models.samplers.ddim import DDIMSampler
 from lvdm.models.samplers.ddim_multiplecond import DDIMSampler as DDIMSampler_multicond
 from einops import rearrange, repeat
+from masactrl.masactrl_utils import regiter_attention_editor_ldm
+from masactrl.masactrl import MutualSelfAttentionControl, VideoSelfAttentionControl
 
 def count_params(model, verbose=False):
     total_params = sum(p.numel() for p in model.parameters())
@@ -116,6 +118,7 @@ def get_latent_z(model, videos):
 
 def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1., \
                         unconditional_guidance_scale=1.0, cfg_img=None, fs=None, text_input=False, multiple_cond_cfg=False, timestep_spacing='uniform', guidance_rescale=0.0, condition_index=None, **kwargs):
+    
     ddim_sampler = DDIMSampler(model) if not multiple_cond_cfg else DDIMSampler_multicond(model)
     batch_size = noise_shape[0]
     fs = torch.tensor([fs] * batch_size, dtype=torch.long, device=model.device)
@@ -199,3 +202,185 @@ def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddi
     ## variants, batch, c, t, h, w
     batch_variants = torch.stack(batch_variants)
     return batch_variants.permute(1, 0, 2, 3, 4, 5)
+
+def image_guided_synthesis_w_ctrl(
+    model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1.,
+    unconditional_guidance_scale=1.0, cfg_img=None, fs=None, text_input=False,
+    multiple_cond_cfg=False, timestep_spacing='uniform', guidance_rescale=0.0,
+    condition_index=None, masa_step=4, masa_layer=10, **kwargs
+):
+    
+    assert condition_index is not None, "Error: condition index is None!"
+    
+    # Step 1: 注册 MasaCtrl editor
+    editor = MutualSelfAttentionControl(masa_step, masa_layer)
+    regiter_attention_editor_ldm(model, editor)  # 注意此时 `model` 是 LDM 主模型
+
+    # Step 2: sampler
+    ddim_sampler = DDIMSampler(model) if not multiple_cond_cfg else DDIMSampler_multicond(model)
+    batch_size = noise_shape[0]
+    fs = torch.tensor([fs] * batch_size, dtype=torch.long, device=model.device)
+
+    # Step 3: 处理 prompt 和 image encoder
+    if not text_input:
+        prompts = [""] * batch_size
+
+    img = videos[:, :, condition_index[0]]  # bchw
+    img_emb = model.embedder(img)          # blc
+    img_emb = model.image_proj_model(img_emb)
+
+    cond_emb = model.get_learned_conditioning(prompts)
+    cond = {"c_crossattn": [torch.cat([cond_emb, img_emb], dim=1)]}
+
+    if model.model.conditioning_key == 'hybrid':
+        z = get_latent_z(model, videos)
+        cond["c_concat"] = [z]
+
+    # Step 4: 构造 unconditional 条件
+    if unconditional_guidance_scale != 1.0:
+        if model.uncond_type == "empty_seq":
+            prompts = batch_size * [""]
+            uc_emb = model.get_learned_conditioning(prompts)
+        elif model.uncond_type == "zero_embed":
+            uc_emb = torch.zeros_like(cond_emb)
+
+        uc_img_emb = model.embedder(torch.zeros_like(img))
+        uc_img_emb = model.image_proj_model(uc_img_emb)
+        uc = {"c_crossattn": [torch.cat([uc_emb, uc_img_emb], dim=1)]}
+        if model.model.conditioning_key == 'hybrid':
+            uc["c_concat"] = [z]
+    else:
+        uc = None
+
+    if multiple_cond_cfg and cfg_img != 1.0:
+        uc_2 = {"c_crossattn": [torch.cat([uc_emb, img_emb], dim=1)]}
+        if model.model.conditioning_key == 'hybrid':
+            uc_2["c_concat"] = [z]
+        kwargs.update({"unconditional_conditioning_img_nonetext": uc_2})
+    else:
+        kwargs.update({"unconditional_conditioning_img_nonetext": None})
+
+    # Step 5: 推理流程
+    z0 = None
+    cond_mask = None
+    batch_variants = []
+
+    for _ in range(n_samples):
+        cond_z0 = z0.clone() if z0 is not None else None
+        if z0 is not None:
+            kwargs.update({"clean_cond": True})
+
+        samples, _ = ddim_sampler.sample(
+            S=ddim_steps,
+            conditioning=cond,
+            batch_size=batch_size,
+            shape=noise_shape[1:],
+            verbose=False,
+            unconditional_guidance_scale=unconditional_guidance_scale,
+            unconditional_conditioning=uc,
+            eta=ddim_eta,
+            cfg_img=cfg_img,
+            mask=cond_mask,
+            x0=cond_z0,
+            fs=fs,
+            timestep_spacing=timestep_spacing,
+            guidance_rescale=guidance_rescale,
+            **kwargs
+        )
+
+        # Step 6: decode & collect
+        batch_images = model.decode_first_stage(samples)
+        batch_variants.append(batch_images)
+
+    return torch.stack(batch_variants).permute(1, 0, 2, 3, 4, 5)
+
+def image_guided_synthesis_w_ctrl2(model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1., \
+                        unconditional_guidance_scale=1.0, cfg_img=None, fs=None, text_input=False, multiple_cond_cfg=False, timestep_spacing='uniform', guidance_rescale=0.0, condition_index=None, **kwargs):
+    #noise shape(1,4,25,72,128)
+    ddim_sampler = DDIMSampler(model) if not multiple_cond_cfg else DDIMSampler_multicond(model)
+    batch_size = videos.shape[0] #noise_shape[0]
+    fs = torch.tensor([fs] * batch_size, dtype=torch.long, device=model.device)
+
+    if not text_input:
+        prompts = [""]*batch_size
+    assert condition_index is not None, "Error: condition index is None!"
+
+    img = videos[:,:,condition_index[0]] #bchw
+    img_emb = model.embedder(img) ## blc
+    img_emb = model.image_proj_model(img_emb)
+
+    cond_emb = model.get_learned_conditioning(prompts)
+    cond = {"c_crossattn": [torch.cat([cond_emb,img_emb], dim=1)]}
+    if model.model.conditioning_key == 'hybrid':
+        z = get_latent_z(model, videos) # b c t h w
+        # if loop or interp:
+        #     img_cat_cond = torch.zeros_like(z)
+        #     img_cat_cond[:,:,0,:,:] = z[:,:,0,:,:]
+        #     img_cat_cond[:,:,-1,:,:] = z[:,:,-1,:,:]
+        # else:
+        img_cat_cond = z
+        cond["c_concat"] = [img_cat_cond] # b c t h w
+    
+    if unconditional_guidance_scale != 1.0:
+        if model.uncond_type == "empty_seq":
+            prompts = batch_size * [""]
+            uc_emb = model.get_learned_conditioning(prompts)
+        elif model.uncond_type == "zero_embed":
+            uc_emb = torch.zeros_like(cond_emb)
+        uc_img_emb = model.embedder(torch.zeros_like(img)) ## b l c
+        uc_img_emb = model.image_proj_model(uc_img_emb)
+        uc = {"c_crossattn": [torch.cat([uc_emb,uc_img_emb],dim=1)]}
+        if model.model.conditioning_key == 'hybrid':
+            uc["c_concat"] = [img_cat_cond]
+    else:
+        uc = None
+
+    ## we need one more unconditioning image=yes, text=""
+    if multiple_cond_cfg and cfg_img != 1.0:
+        uc_2 = {"c_crossattn": [torch.cat([uc_emb,img_emb],dim=1)]}
+        if model.model.conditioning_key == 'hybrid':
+            uc_2["c_concat"] = [img_cat_cond]
+        kwargs.update({"unconditional_conditioning_img_nonetext": uc_2})
+    else:
+        kwargs.update({"unconditional_conditioning_img_nonetext": None})
+
+    # Register Ctrl
+    editor = VideoSelfAttentionControl()
+    regiter_attention_editor_ldm(model, editor)
+
+    z0 = None
+    cond_mask = None
+
+    batch_variants = []
+    for _ in range(n_samples):
+
+        if z0 is not None:
+            cond_z0 = z0.clone()
+            kwargs.update({"clean_cond": True})
+        else:
+            cond_z0 = None
+        if ddim_sampler is not None:
+
+            samples, _ = ddim_sampler.sample(S=ddim_steps,
+                                            conditioning=cond,
+                                            batch_size=batch_size,
+                                            shape=noise_shape[1:],
+                                            verbose=False,
+                                            unconditional_guidance_scale=unconditional_guidance_scale,
+                                            unconditional_conditioning=uc,
+                                            eta=ddim_eta,
+                                            cfg_img=cfg_img, 
+                                            mask=cond_mask,
+                                            x0=cond_z0,
+                                            fs=fs,
+                                            timestep_spacing=timestep_spacing,
+                                            guidance_rescale=guidance_rescale,
+                                            **kwargs
+                                            )
+
+        ## reconstruct from latent to pixel space
+        batch_images = model.decode_first_stage(samples)
+        batch_variants.append(batch_images)
+    ## variants, batch, c, t, h, w
+    batch_variants = torch.stack(batch_variants)
+    return batch_variants.permute(1, 0, 2, 3, 4, 5)#(2,1,3,25,576,1024)

@@ -90,7 +90,7 @@ class DDIMSampler(object):
         
         # check condition bs
         if conditioning is not None:
-            if isinstance(conditioning, dict):
+            if isinstance(conditioning, dict):#in
                 try:
                     cbs = conditioning[list(conditioning.keys())[0]].shape[0]
                 except:
