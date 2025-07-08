@@ -425,6 +425,102 @@ def generate_dual_traj_txt(
     num_views = c2ws_orig.shape[0]
     return cameras1, cameras2, num_views
 
+
+def generate_dual_traj_txt2(
+    c2ws_anchor, H, W, fs, c,
+    phi, theta, r,
+    frame, device,
+    viz_traj=False, save_dir=None
+):
+    """
+    Generate two camera trajectories:
+    - The original trajectory
+    - A slightly perturbed trajectory (smooth) near the original one
+    """
+    scale_phi = 3.0
+    scale_theta = 3.0
+    scale_r = 0.01
+    def interp(values, mode='smooth'):
+        if len(values) > 3:
+            out = txt_interpolation(values, frame, mode=mode)
+            out[0], out[-1] = values[0], values[-1]
+        else:
+            out = txt_interpolation(values, frame, mode='linear')
+        return out
+
+    # ========== 1. 原始轨迹插值 ==========
+    phis = interp(phi)
+    thetas = interp(theta)
+    rs = interp(r)
+    rs = rs * c2ws_anchor[0, 2, 3].cpu().numpy()
+
+    # ========== 2. 对低分辨率原始轨迹加入扰动 ==========
+    coarse_steps = 8  # 粗时间步数
+    coarse_idx = np.linspace(0, len(phis)-1, coarse_steps).astype(int)
+
+    # 抽取低分辨率轨迹
+    phi_coarse = np.array(phis)[coarse_idx]
+    theta_coarse = np.array(thetas)[coarse_idx]
+    r_coarse = np.array(rs)[coarse_idx]
+
+    # 加扰动（有连续性）
+    # np.random.seed(42)
+    phi_coarse += np.random.normal(scale=scale_phi, size=coarse_steps)  # 更小的扰动
+    theta_coarse += np.random.normal(scale=scale_theta, size=coarse_steps)
+    r_coarse += np.random.normal(scale=scale_r * c2ws_anchor[0, 2, 3].cpu().numpy(), size=coarse_steps)
+
+    # 再次插值，生成扰动后的平滑轨迹
+    phis_perturbed = interp(phi_coarse, mode='smooth')
+    thetas_perturbed = interp(theta_coarse, mode='smooth')
+    rs_perturbed = interp(r_coarse, mode='smooth')
+
+    # ========== 3. 构造 c2w pose ==========
+    def build_c2ws(theta_list, phi_list, r_list):
+        c2ws_list = []
+        for th, ph, r_val in zip(theta_list, phi_list, r_list):
+            c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), np.float32(r_val), device)
+            c2ws_list.append(c2w_new)
+        return torch.cat(c2ws_list, dim=0)
+
+    c2ws_orig = build_c2ws(thetas, phis, rs)
+    c2ws_perturb = build_c2ws(thetas_perturbed, phis_perturbed, rs_perturbed)
+
+    # ========== 4. 转换为 cameras ==========
+    def convert_to_camera(c2ws):
+        R, T = c2ws[:, :3, :3], c2ws[:, :3, 3:]
+        R = torch.stack([-R[:, :, 0], -R[:, :, 1], R[:, :, 2]], 2)  # RDF -> LUF
+        new_c2w = torch.cat([R, T], 2)
+        w2c = torch.linalg.inv(torch.cat(
+            (new_c2w, torch.Tensor([[[0, 0, 0, 1]]]).to(device).repeat(new_c2w.shape[0], 1, 1)), 1
+        ))
+        R_new, T_new = w2c[:, :3, :3].permute(0, 2, 1), w2c[:, :3, 3]
+        image_size = ((H, W),)
+        return PerspectiveCameras(
+            focal_length=fs,
+            principal_point=c,
+            in_ndc=False,
+            image_size=image_size,
+            R=R_new,
+            T=T_new,
+            device=device
+        )
+
+    cameras1 = convert_to_camera(c2ws_orig)
+    cameras2 = convert_to_camera(c2ws_perturb)
+
+    # ========== 5. 可视化 ==========
+    if viz_traj and save_dir is not None:
+        poses1 = c2ws_orig.cpu().numpy()
+        poses2 = c2ws_perturb.cpu().numpy()
+
+        frames1 = [visualizer_frame(poses1, i) for i in range(len(poses1))]
+        save_video(np.array(frames1) / 255., os.path.join(save_dir, 'viz_traj_orig.mp4'))
+
+        frames2 = [visualizer_frame(poses2, i) for i in range(len(poses2))]
+        save_video(np.array(frames2) / 255., os.path.join(save_dir, 'viz_traj_perturb.mp4'))
+
+    return cameras1, cameras2, c2ws_orig.shape[0]
+
 def setup_renderer(cameras, image_size):
     # Define the settings for rasterization and shading.
     raster_settings = PointsRasterizationSettings(

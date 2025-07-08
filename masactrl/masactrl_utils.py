@@ -14,6 +14,12 @@ try:
 except:
     XFORMERS_IS_AVAILBLE = False
 
+from lvdm.common import (
+    checkpoint,
+    exists,
+    default,
+)
+
 from torchvision.utils import save_image
 from einops import rearrange, repeat
 
@@ -38,9 +44,9 @@ class AttentionBase:
     #         self.after_step()
     #     return out
 
-    def __call__(self, q, k, v, *args, is_cross=False, place_in_unet=None, num_heads=None, b=None, efficient=False, **kwargs):
+    def __call__(self, q, k, v, *args, k_ip=None, v_ip=None, is_cross=False, place_in_unet=None, num_heads=None, b=None, efficient=False, **kwargs):
         if efficient:
-            out = self.efficient_forward(q, k, v, is_cross=is_cross, place_in_unet=place_in_unet, num_heads=num_heads, b=b, **kwargs)
+            out, out_ip = self.efficient_forward(q, k, v, k_ip=k_ip, v_ip=v_ip, is_cross=is_cross, place_in_unet=place_in_unet, num_heads=num_heads, b=b, **kwargs)
         else:
             # assume sim and attn are in args or kwargs
             if len(args) >= 2:
@@ -54,17 +60,22 @@ class AttentionBase:
             self.cur_att_layer = 0
             self.cur_step += 1
             self.after_step()
-        return out
+        return out, out_ip
 
     def forward(self, q, k, v, sim, attn, is_cross, place_in_unet, num_heads, **kwargs):
         out = torch.einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=num_heads)
         return out
 
-    def efficient_forward(self, q, k, v, is_cross, place_in_unet, num_heads, **kwargs):
-        out = xformers.ops.memory_efficient_attention(q, k, v)
+    def efficient_forward(self, q, k, v, k_ip, v_ip, is_cross, place_in_unet, num_heads, **kwargs):
+        out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=None)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=num_heads)
-        return out
+        out_ip = None
+        if k_ip is not None:
+            out_ip = xformers.ops.memory_efficient_attention(q, k_ip, v_ip, attn_bias=None, op=None)
+            out_ip = rearrange(out_ip, '(b h) n d -> b n (h d)', h=num_heads)
+
+        return out, out_ip
 
     def reset(self):
         self.cur_step = 0
@@ -234,39 +245,84 @@ def regiter_attention_editor_ldm(model, editor: AttentionBase):
             to_out = self.to_out
             if isinstance(to_out, nn.modules.container.ModuleList):
                 to_out = self.to_out[0]
-
-            h = self.heads
-            #b, n, _ = x.shape
             is_cross = context is not None
-            context = context if is_cross else x
-
+            h = self.heads
+            q = self.to_q(x)
+            #b, n, _ = x.shape
+            spatial_self_attn = context is None
+            context = default(context, x)
+            
+            #is_cross = context is not None
+            #context = context if is_cross else x
             # project to q, k, v
-            q = self.to_q(x)#(25,9216,320)
-            k = self.to_k(context)
-            v = self.to_v(context)
+            k_ip, v_ip, out_ip = None, None, None
+            
+            if self.image_cross_attention and not spatial_self_attn:#(50,77,1024)#(50,256,1024)
+                context, context_image = context[:, :self.text_context_len, :], context[:, self.text_context_len:, :]
+                k = self.to_k(context)
+                v = self.to_v(context)#(50,77,320)
+                k_ip = self.to_k_ip(context_image)#(50,256,320)
+                v_ip = self.to_v_ip(context_image)
+            else:
+                if not spatial_self_attn:
+                    context = context[:, :self.text_context_len, :]
+                k = self.to_k(context)
+                v = self.to_v(context)
             q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
-            if efficient:
-                # use memory-efficient attention via xformers
-                out = editor(
-                    q, k, v, None, None, is_cross=is_cross, place_in_unet=place_in_unet,
-                    num_heads=self.heads, b=2, efficient=True, scale=self.scale
-                )
-            else:
+            if k_ip is not None:
+                k_ip, v_ip = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (k_ip, v_ip))
+            # q = self.to_q(x)#(25,9216,320)
+            # k = self.to_k(context)
+            # v = self.to_v(context)
+            # q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+            if self.relative_position or self.temporal_length is not None:
+                # do relative position embedding when using Temporal Transformer
+                assert(self.temporal_length is not None)#temporal modeling not efficent
                 sim = torch.einsum('b i d, b j d -> b i j', q, k) * self.scale
-                if mask is not None:
-                    mask = rearrange(mask, 'b ... -> b (...)')
-                    max_neg_value = -torch.finfo(sim.dtype).max
-                    mask = repeat(mask, 'b j -> (b h) () j', h=h)
-                    mask = mask[:, None, :].repeat(h, 1, 1)
-                    sim.masked_fill_(~mask, max_neg_value)
+                
+                if self.relative_position:
+                    len_q, len_k, len_v = q.shape[1], k.shape[1], v.shape[1]
+                    k2 = self.relative_position_k(len_q, len_k)
+                    sim2 = torch.einsum('b t d, t s d -> b t s', q, k2) * self.scale # TODO check 
+                    sim += sim2
+                del k
+                # attention, what we cannot get enough of
+                sim = sim.softmax(dim=-1)
 
-                attn = sim.softmax(dim=-1)
-                out = editor(
-                    q, k, v, sim, attn, is_cross, place_in_unet,
-                    self.heads, scale=self.scale, b=2
-                )
+                out = torch.einsum('b i j, b j d -> b i d', sim, v)
+                if self.relative_position:
+                    v2 = self.relative_position_v(len_q, len_v)
+                    out2 = torch.einsum('b t s, t s d -> b t d', sim, v2) # TODO check
+                    out += out2
+                out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
 
+
+                ## for image cross-attention
+                if k_ip is not None:
+                    #k_ip, v_ip = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (k_ip, v_ip))
+                    sim_ip =  torch.einsum('b i d, b j d -> b i j', q, k_ip) * self.scale
+                    del k_ip
+                    sim_ip = sim_ip.softmax(dim=-1)
+                    out_ip = torch.einsum('b i j, b j d -> b i d', sim_ip, v_ip)
+                    out_ip = rearrange(out_ip, '(b h) n d -> b n (h d)', h=h)
+
+
+            else:   #spatial transformer
+                if XFORMERS_IS_AVAILBLE and self.temporal_length is None:
+                    # use memory-efficient attention via xformers
+                    out, out_ip = editor(
+                        q, k, v, None, None, k_ip=k_ip, v_ip=v_ip, is_cross=is_cross, place_in_unet=place_in_unet,
+                        num_heads=self.heads, b=2, efficient=True, scale=self.scale
+                    )
+
+
+            if out_ip is not None:
+                if self.image_cross_attention_scale_learnable:
+                    out = out + self.image_cross_attention_scale * out_ip * (torch.tanh(self.alpha)+1)
+                else:
+                    out = out + self.image_cross_attention_scale * out_ip
+        
             return to_out(out)
 
         return forward
@@ -288,3 +344,4 @@ def regiter_attention_editor_ldm(model, editor: AttentionBase):
         elif "output" in net_name:
             cross_att_count += register_editor(net, 0, "output")
     editor.num_att_layers = cross_att_count
+    print("total cross_attn count", cross_att_count)

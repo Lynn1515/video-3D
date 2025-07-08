@@ -1,27 +1,11 @@
-## ___***ViewCrafter: Taming Video Diffusion Models for High-fidelity Novel View Synthesis***___
-<div align="center">
-<img src='assets/logo.png' style="height:100px"></img>
+## ___***Training-Free Multi-View Consistency Editing for Camera-Controlled Video Diffusion***___
 
- <a href='https://arxiv.org/abs/2409.02048'><img src='https://img.shields.io/badge/arXiv-2409.02048-b31b1b.svg'></a> &nbsp;
- <a href='https://drexubery.github.io/ViewCrafter/'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
- <a href='https://www.youtube.com/watch?v=WGIEmu9eXmU'><img src='https://img.shields.io/badge/Youtube-Video-b31b1b.svg'></a>&nbsp;
- <a href='https://huggingface.co/spaces/Doubiiu/ViewCrafter'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue'></a> &nbsp;
 
-_**[Wangbo Yu*](https://scholar.google.com/citations?user=UOE8-qsAAAAJ&hl=zh-CN), [Jinbo Xing*](https://doubiiu.github.io/), [Li Yuan*](), [Wenbo Hu&dagger;](https://wbhu.github.io/), [Xiaoyu Li](https://xiaoyu258.github.io/), [Zhipeng Huang](), <br> [Xiangjun Gao](https://scholar.google.com/citations?user=qgdesEcAAAAJ&hl=en/), [Tien-Tsin Wong](https://www.cse.cuhk.edu.hk/~ttwong/myself.html), [Ying Shan](https://scholar.google.com/citations?hl=en&user=4oXBp9UAAAAJ&view_op=list_works&sortby=pubdate), [Yonghong Tian&dagger;]()**_
-<br><br>
-
-</div>
-
-🤗 If you find ViewCrafter useful, **please help ⭐ this repo**, which is important to Open-Source projects. Thanks!
+🤗 If you find this repo useful, **please help ⭐ this repo**, which is important to Open-Source projects. Thanks!
 
 ## 🔆 Introduction
 
-- __[2024-11-6]__: Add a simple evaluation script for single-view novel view synthesis.
-- __[2024-10-15]__: 🔥🔥 Release the code for sparse-view novel view synthesis.
-- __[2024-09-01]__: Launch the project page and update the arXiv preprint.
-- __[2024-09-01]__: Release pretrained models and the code for single-view novel view synthesis.
-
-ViewCrafter can generate high-fidelity novel views from <strong>a single or sparse reference image</strong>, while also supporting highly precise pose control. Below shows some examples:
+### result from viewcrafter
 
 ### Zero-shot novel view synthesis (single view)
 <table class="center">

@@ -100,6 +100,7 @@ class VideoSelfAttentionControl(AttentionBase):
         return out
 
     def efficient_attn(self, q, k, v, num_heads, b):
+        #(bt hw c)-> 
         X = q.shape[0]  // (num_heads * b)  # time steps (or views)
         q = rearrange(q, "(b x1 h) n d -> (x1 h) (b n) d", h=num_heads, x1=X)
         k = rearrange(k, "(b x1 h) n d -> (x1 h) (b n) d", h=num_heads, x1=X)
@@ -108,20 +109,24 @@ class VideoSelfAttentionControl(AttentionBase):
         out = rearrange(out, "(x1 h) (b n) d -> (b x1) n (h d)", b=b, x1=X, h=num_heads)
         return out
     
-    def efficient_forward(self, q, k, v, is_cross, place_in_unet, num_heads, b=2, **kwargs):
+    def efficient_forward(self, q, k, v, k_ip, v_ip, is_cross, place_in_unet, num_heads, b=2, **kwargs):
         if is_cross or self.cur_step not in self.step_idx or self.cur_att_layer // 2 not in self.layer_idx:
-            return super().efficient_forward(q, k, v, is_cross, place_in_unet, num_heads, **kwargs)
+            return super().efficient_forward(q, k, v, k_ip, v_ip, is_cross, place_in_unet, num_heads, **kwargs)
 
         # qu, qc = q.chunk(2)
         # ku, kc = k.chunk(2)
         # vu, vc = v.chunk(2)
-        #print("Xfomer testing******************************")
+        
         slice_len = (q.shape[0] // b)  # t * h
         # efficient attention
-
-        out = self.efficient_attn(q, k[:slice_len], v[:slice_len],num_heads=num_heads, b=b)
+        out = self.efficient_attn(q, k, v, num_heads=num_heads, b=b)#[:slice_len]
+        #out = self.efficient_attn(q, k, v,num_heads=num_heads, b=b)
+        out_ip = None
+        if k_ip is not None and v_ip is not None:
+            out_ip = self.efficient_attn(q, k_ip, v_ip, num_heads=num_heads, b=b)
+            #out_ip = self.efficient_attn(q, k_ip[slice_len:], v_ip[slice_len:], num_heads=num_heads, b=b)
         #out_c = self.efficient_attn(qc, kc[:slice_len], vc[:slice_len])
-        return out#torch.cat([out_u, out_c], dim=0)
+        return out, out_ip#torch.cat([out_u, out_c], dim=0)
     
     def forward(self, q, k, v, sim, attn, is_cross, place_in_unet, num_heads, b, **kwargs):
         if is_cross or self.cur_step not in self.step_idx or self.cur_att_layer // 2 not in self.layer_idx:
@@ -135,7 +140,7 @@ class VideoSelfAttentionControl(AttentionBase):
         # For example: input shape (2b * t * h) * n -> want to extract 1st b instances (t * h * n)
         slice_len = (q.shape[0] // b)  # == t * h
         #slice_tokens = slice_len * b // 2  # since we split qu, ku, etc. above
-        print("j******************************")
+        #print("j******************************")
 
         out = self.attn_batch(q, k[:slice_len], v[:slice_len], sim[:slice_len], attn, is_cross, place_in_unet, num_heads, b, **kwargs)
         #out_c = self.attn_batch(qc, kc[:slice_len], vc[:slice_len], sim[:slice_len], attnc, is_cross, place_in_unet, num_heads, b, **kwargs)

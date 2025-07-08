@@ -305,7 +305,7 @@ def image_guided_synthesis_w_ctrl2(model, prompts, videos, noise_shape, n_sample
         prompts = [""]*batch_size
     assert condition_index is not None, "Error: condition index is None!"
 
-    img = videos[:,:,condition_index[0]] #bchw
+    img = videos[:,:,condition_index[0]] #bcthw -> bchw
     img_emb = model.embedder(img) ## blc
     img_emb = model.image_proj_model(img_emb)
 
@@ -314,10 +314,10 @@ def image_guided_synthesis_w_ctrl2(model, prompts, videos, noise_shape, n_sample
     if model.model.conditioning_key == 'hybrid':
         z = get_latent_z(model, videos) # b c t h w
         # if loop or interp:
-        #     img_cat_cond = torch.zeros_like(z)
-        #     img_cat_cond[:,:,0,:,:] = z[:,:,0,:,:]
-        #     img_cat_cond[:,:,-1,:,:] = z[:,:,-1,:,:]
-        # else:
+        z1=z[0]
+        z2=z[1]
+        if (z1 == z2).all():
+            raise ValueError("z1 and z2 should not be the same, please check your input videos.")
         img_cat_cond = z
         cond["c_concat"] = [img_cat_cond] # b c t h w
     
@@ -345,7 +345,7 @@ def image_guided_synthesis_w_ctrl2(model, prompts, videos, noise_shape, n_sample
         kwargs.update({"unconditional_conditioning_img_nonetext": None})
 
     # Register Ctrl
-    editor = VideoSelfAttentionControl()
+    editor = VideoSelfAttentionControl(start_step=4, start_layer=10,total_steps=30)
     regiter_attention_editor_ldm(model, editor)
 
     z0 = None
@@ -365,7 +365,7 @@ def image_guided_synthesis_w_ctrl2(model, prompts, videos, noise_shape, n_sample
                                             conditioning=cond,
                                             batch_size=batch_size,
                                             shape=noise_shape[1:],
-                                            verbose=False,
+                                            verbose=True,
                                             unconditional_guidance_scale=unconditional_guidance_scale,
                                             unconditional_conditioning=uc,
                                             eta=ddim_eta,

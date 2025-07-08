@@ -65,7 +65,7 @@ class CrossAttention(nn.Module):
             ## only used for spatial attention, while NOT for temporal attention
             if XFORMERS_IS_AVAILBLE and temporal_length is None:
                 self.forward = self.efficient_forward
-
+        self.temporal_length = temporal_length
         self.video_length = video_length
         self.image_cross_attention = image_cross_attention
         self.image_cross_attention_scale = image_cross_attention_scale
@@ -140,7 +140,7 @@ class CrossAttention(nn.Module):
                 out = out + self.image_cross_attention_scale * out_ip * (torch.tanh(self.alpha)+1)
             else:
                 out = out + self.image_cross_attention_scale * out_ip
-        
+
         return self.to_out(out)
     
     def efficient_forward(self, x, context=None, mask=None):

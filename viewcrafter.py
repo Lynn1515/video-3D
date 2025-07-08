@@ -121,7 +121,7 @@ class ViewCrafter:
             # save_results_seperate(batch_samples[0], self.opts.save_dir, fps=8)
             # torch.Size([1, 3, 25, 576, 1024]) [-1,1]
         #batch_samples#(2,1,3,25,576,1024)
-        return torch.clamp(batch_samples[0][0].permute(1,2,3,0), -1., 1.) 
+        return torch.clamp(batch_samples[0][0].permute(1,2,3,0), -1., 1.), torch.clamp(batch_samples[1][0].permute(1,2,3,0), -1., 1.) 
     def nvs_single_view(self, gradio=False):
         # 最后一个view为 0 pose
         c2ws = self.scene.get_im_poses().detach()[1:] #(1,4,4)
@@ -183,6 +183,8 @@ class ViewCrafter:
         diffusion_results = self.run_diffusion(render_results)
         save_video((diffusion_results + 1.0) / 2.0, os.path.join(self.opts.save_dir, 'diffusion0.mp4'))
 
+
+
         return diffusion_results
 
 
@@ -231,7 +233,7 @@ class ViewCrafter:
                     r = [float(i) for i in lines[2].split()]
             else: 
                 phi, theta, r = self.gradio_traj
-            camera_traj1, camera_traj2, num_views = generate_dual_traj_txt(c2ws, H, W, focals, principal_points, phi, theta, r,self.opts.video_length, self.device,viz_traj=True, save_dir = self.opts.save_dir)
+            camera_traj1, camera_traj2, num_views = generate_dual_traj_txt2(c2ws, H, W, focals, principal_points, phi, theta, r,self.opts.video_length, self.device,viz_traj=True, save_dir = self.opts.save_dir)
         else:
             raise KeyError(f"Invalid Mode: {self.opts.mode}")
         # ========== render traj1 ==========
@@ -244,7 +246,7 @@ class ViewCrafter:
                 
         save_video(render_results1, os.path.join(self.opts.save_dir, 'render0.mp4'))
 
-        # ========== 渲染轨迹2 ==========
+        # ==========render traj2 ==========
         render_results2, viewmask2 = self.run_render(
             [pcd[-1]], [imgs[-1]], masks, H, W, camera_traj2, num_views
         )
@@ -257,12 +259,22 @@ class ViewCrafter:
         #save_pointcloud_with_normals([imgs[-1]], [pcd[-1]], msk=None, save_path=os.path.join(self.opts.save_dir,'pcd1.ply') , mask_pc=False, reduce_pc=False)
         #render_results = torch.cat([render_results1, render_results2], dim=0)
         render_results = torch.stack([render_results1, render_results2], dim=0)
-        diffusion_results = self.run_diffusion_batches(render_results)
+        diffusion_results0, diffusion_results1 = self.run_diffusion_batches(render_results)
+
+        # vid0 = (torch.clamp(batch_samples[0][0], -1., 1.) + 1.0) / 2.0  # (3, 25, H, W)
+        # vid1 = (torch.clamp(batch_samples[1][0], -1., 1.) + 1.0) / 2.0
+
+
+        save_video((diffusion_results0 + 1.0) / 2.0, os.path.join(self.opts.save_dir, 'diffusion0.mp4'))
+        save_video((diffusion_results1 + 1.0) / 2.0, os.path.join(self.opts.save_dir, 'diffusion1.mp4'))
+
+        concat_vid = torch.cat([diffusion_results0, diffusion_results1], dim=2)  # 上下拼接，高度加倍
+        save_video((concat_vid + 1.0)/2.0, os.path.join(self.opts.save_dir, 'diffusion_concat.mp4'))
 
         save_pointcloud_with_normals([imgs[-1]], [pcd[-1]], msk=None, save_path=os.path.join(self.opts.save_dir,'pcd0.ply') , mask_pc=False, reduce_pc=False)
-        save_video((diffusion_results + 1.0) / 2.0, os.path.join(self.opts.save_dir, 'diffusion0.mp4'))
+        #save_video((diffusion_results + 1.0) / 2.0, os.path.join(self.opts.save_dir, 'diffusion0.mp4'))
 
-        return diffusion_results
+        return concat_vid
 
     def nvs_sparse_view(self,iter):
 
