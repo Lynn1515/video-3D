@@ -91,7 +91,8 @@ def sphere2pose(c2ws_input, theta, phi, r, device,x=None,y=None):
     c2ws = copy.deepcopy(c2ws_input)
 
     #先沿着世界坐标系z轴方向平移再旋转
-    c2ws[:,2,3] += r
+    if r is not None:
+        c2ws[:,2,3] += r
     if x is not None:
         c2ws[:,1,3] += y
     if y is not None:
@@ -260,7 +261,7 @@ def generate_traj_interp(c2ws,H,W,fs,c,ns,device):
     
     return cameras, num_views
 
-def generate_traj_specified(c2ws_anchor,H,W,fs,c,theta, phi,d_r,d_x,d_y,frame,device):
+def generate_traj_specified(c2ws_anchor,H,W,fs,c,theta, phi,d_r, d_x, d_y, frame, device):
     # Initialize a camera.
     """
     The camera coordinate sysmte in COLMAP is right-down-forward
@@ -270,8 +271,8 @@ def generate_traj_specified(c2ws_anchor,H,W,fs,c,theta, phi,d_r,d_x,d_y,frame,de
     thetas = np.linspace(0,theta,frame)
     phis = np.linspace(0,phi,frame)
     rs = np.linspace(0,d_r*c2ws_anchor[0,2,3].cpu(),frame)
-    xs = np.linspace(0,d_x.cpu(),frame)
-    ys = np.linspace(0,d_y.cpu(),frame)
+    xs = np.linspace(0,d_x,frame)
+    ys = np.linspace(0,d_y,frame)
     c2ws_list = []
     for th, ph, r, x, y in zip(thetas,phis,rs, xs, ys):
         c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), np.float32(r), device, np.float32(x),np.float32(y))
@@ -341,6 +342,85 @@ def generate_traj_txt(c2ws_anchor, H, W, fs, c, phi, theta, r, frame,device,viz_
     image_size = ((H, W),)  # (h, w)
     cameras = PerspectiveCameras(focal_length=fs, principal_point=c, in_ndc=False, image_size=image_size, R=R_new, T=T_new, device=device)
     return cameras,num_views
+
+def generate_two_trajs(c2ws_anchor, H, W, fs, c, phi, theta, r, frame,
+                              device, viz_traj=False, save_dir=None,
+                              local_delta=2.0):
+    """
+    生成两组相机轨迹（等长）
+    1) 全局轨迹: (a1, a2, ..., an)
+    2) 局部轨迹: (a1, a2, a3', ..., an') 在 a2 附近球面小范围采样
+    """
+
+    # --------- 全局轨迹 ----------
+    if len(phi) > 3:
+        phis = txt_interpolation(phi, frame, mode='smooth')
+        phis[0], phis[-1] = phi[0], phi[-1]
+    else:
+        phis = txt_interpolation(phi, frame, mode='linear')
+
+    if len(theta) > 3:
+        thetas = txt_interpolation(theta, frame, mode='smooth')
+        thetas[0], thetas[-1] = theta[0], theta[-1]
+    else:
+        thetas = txt_interpolation(theta, frame, mode='linear')
+
+    if len(r) > 3:
+        rs = txt_interpolation(r, frame, mode='smooth')
+        rs[0], rs[-1] = r[0], r[-1]
+    else:
+        rs = txt_interpolation(r, frame, mode='linear')
+    rs = rs * c2ws_anchor[0, 2, 3].cpu().numpy()
+
+    # 全局轨迹采样
+    c2ws_list = []
+    for th, ph, rr in zip(thetas, phis, rs):
+        c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), np.float32(rr), device)
+        c2ws_list.append(c2w_new)
+    c2ws_global = torch.cat(c2ws_list, dim=0)
+    num_views = c2ws_global.shape[0]
+
+    # --------- 局部轨迹 ----------
+    a1, a2 = c2ws_global[0:1], c2ws_global[1:2]
+    local_list = [a1, a2]
+
+    # 获取 a2 对应的 (phi, theta, r)
+    phi2, theta2, r2 = phi[1], theta[1], rs[1]
+
+    # 在 phi/theta 上做小范围扰动（圆周运动）
+    angles = np.linspace(0, 2*np.pi, num_views-2)
+    for ang in angles:
+        dphi = local_delta * np.sin(ang)   # 上下摆动
+        dtheta = local_delta * np.cos(ang) # 左右环绕
+        ph = phi2 + dphi
+        th = theta2 + dtheta
+        rr = r2
+
+        c2w_new = sphere2pose(c2ws_anchor, np.float32(th), np.float32(ph), np.float32(rr), device)
+        local_list.append(c2w_new)
+
+    c2ws_local = torch.cat(local_list, dim=0)
+
+    # --------- 转成 pytorch3d 相机 ----------
+    def to_cameras(c2ws):
+        R, T = c2ws[:, :3, :3], c2ws[:, :3, 3:]
+        R = torch.stack([-R[:, :, 0], -R[:, :, 1], R[:, :, 2]], 2)  # RDF->LUF
+        new_c2w = torch.cat([R, T], 2)
+        w2c = torch.linalg.inv(torch.cat((new_c2w, torch.Tensor([[[0, 0, 0, 1]]]).to(device).repeat(new_c2w.shape[0], 1, 1)), 1))
+        R_new, T_new = w2c[:, :3, :3].permute(0, 2, 1), w2c[:, :3, 3]
+        image_size = ((H, W),)
+        cameras = PerspectiveCameras(
+            focal_length=fs, principal_point=c, in_ndc=False, image_size=image_size,
+            R=R_new, T=T_new, device=device
+        )
+        return cameras
+
+    cameras_global = to_cameras(c2ws_global)
+    cameras_local = to_cameras(c2ws_local)
+
+    return cameras_global, cameras_local, num_views
+
+
 
 def generate_dual_traj_txt(
     c2ws_anchor, H, W, fs, c,
@@ -430,16 +510,21 @@ def generate_dual_traj_txt2(
     c2ws_anchor, H, W, fs, c,
     phi, theta, r,
     frame, device,
+    traj_type="perturb",  # 新增参数
     viz_traj=False, save_dir=None
 ):
     """
     Generate two camera trajectories:
     - The original trajectory
-    - A slightly perturbed trajectory (smooth) near the original one
+    - A modified one based on selected traj_type:
+        - 'perturb': small smooth noise (default)
+        - 'left-right-sym': θ mirrored trajectory
+        - 'up-down-sym': φ mirrored trajectory
     """
     scale_phi = 3.0
     scale_theta = 3.0
-    scale_r = 0.01
+    scale_r = 0.05
+
     def interp(values, mode='smooth'):
         if len(values) > 3:
             out = txt_interpolation(values, frame, mode=mode)
@@ -448,33 +533,54 @@ def generate_dual_traj_txt2(
             out = txt_interpolation(values, frame, mode='linear')
         return out
 
-    # ========== 1. 原始轨迹插值 ==========
+    # ===== 1. 原始轨迹插值 =====
     phis = interp(phi)
     thetas = interp(theta)
     rs = interp(r)
     rs = rs * c2ws_anchor[0, 2, 3].cpu().numpy()
 
-    # ========== 2. 对低分辨率原始轨迹加入扰动 ==========
-    coarse_steps = 8  # 粗时间步数
-    coarse_idx = np.linspace(0, len(phis)-1, coarse_steps).astype(int)
+    # ===== 2. 构造第二条轨迹（根据不同模式）=====
+    coarse_steps = 8
+    coarse_idx = np.linspace(0, len(phis) - 1, coarse_steps).astype(int)
 
-    # 抽取低分辨率轨迹
     phi_coarse = np.array(phis)[coarse_idx]
     theta_coarse = np.array(thetas)[coarse_idx]
     r_coarse = np.array(rs)[coarse_idx]
 
-    # 加扰动（有连续性）
-    # np.random.seed(42)
-    phi_coarse += np.random.normal(scale=scale_phi, size=coarse_steps)  # 更小的扰动
-    theta_coarse += np.random.normal(scale=scale_theta, size=coarse_steps)
-    r_coarse += np.random.normal(scale=scale_r * c2ws_anchor[0, 2, 3].cpu().numpy(), size=coarse_steps)
+    if traj_type == "perturb":
+        # 原始扰动模式
+        phi_coarse += np.random.normal(scale=scale_phi, size=coarse_steps)
+        theta_coarse += np.random.normal(scale=scale_theta, size=coarse_steps)
+        r_coarse += np.random.normal(scale=scale_r, size=coarse_steps)
 
-    # 再次插值，生成扰动后的平滑轨迹
+    elif traj_type == "up-down-sym":
+        # θ 上下对称
+        theta_coarse = -theta_coarse  # 镜像
+        # 其他保持不变
+
+    elif traj_type == "left-right-sym":
+        # φ 左右对称
+        phi_coarse = -phi_coarse
+
+    elif traj_type == "offset":
+        theta_offset = 10  # 斜切角度
+        theta_coarse = theta_coarse + theta_offset
+
+    elif traj_type == "zoom-in":
+        r_coarse += -0.05 # 更近观察目标细节
+
+    elif traj_type == "zoom-out":
+        r_coarse += 0.05   # 更远观察整体结构
+
+    else:
+        raise ValueError(f"Unknown traj_type: {traj_type}")
+
+    # ===== 3. 插值新轨迹 =====
     phis_perturbed = interp(phi_coarse, mode='smooth')
     thetas_perturbed = interp(theta_coarse, mode='smooth')
     rs_perturbed = interp(r_coarse, mode='smooth')
 
-    # ========== 3. 构造 c2w pose ==========
+    # ===== 4. 构造相机位姿 =====
     def build_c2ws(theta_list, phi_list, r_list):
         c2ws_list = []
         for th, ph, r_val in zip(theta_list, phi_list, r_list):
@@ -485,7 +591,7 @@ def generate_dual_traj_txt2(
     c2ws_orig = build_c2ws(thetas, phis, rs)
     c2ws_perturb = build_c2ws(thetas_perturbed, phis_perturbed, rs_perturbed)
 
-    # ========== 4. 转换为 cameras ==========
+    # ===== 5. 转换为相机类 =====
     def convert_to_camera(c2ws):
         R, T = c2ws[:, :3, :3], c2ws[:, :3, 3:]
         R = torch.stack([-R[:, :, 0], -R[:, :, 1], R[:, :, 2]], 2)  # RDF -> LUF
@@ -508,7 +614,7 @@ def generate_dual_traj_txt2(
     cameras1 = convert_to_camera(c2ws_orig)
     cameras2 = convert_to_camera(c2ws_perturb)
 
-    # ========== 5. 可视化 ==========
+    # ===== 6. 可视化轨迹（可选）=====
     if viz_traj and save_dir is not None:
         poses1 = c2ws_orig.cpu().numpy()
         poses2 = c2ws_perturb.cpu().numpy()

@@ -345,7 +345,7 @@ def image_guided_synthesis_w_ctrl2(model, prompts, videos, noise_shape, n_sample
         kwargs.update({"unconditional_conditioning_img_nonetext": None})
 
     # Register Ctrl
-    editor = VideoSelfAttentionControl(start_step=4, start_layer=10,total_steps=30)
+    editor = VideoSelfAttentionControl(start_step=4, start_layer=10,total_steps=40)
     regiter_attention_editor_ldm(model, editor)
 
     z0 = None

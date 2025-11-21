@@ -185,7 +185,8 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
                  freeze=True, layer="last"):
         super().__init__()
         assert layer in self.LAYERS
-        model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'), pretrained=version)
+        model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'), 
+                                                            pretrained=version)
         del model.visual
         self.model = model
 
@@ -243,7 +244,7 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
                  freeze=True, layer="pooled", antialias=True, ucg_rate=0.):
         super().__init__()
         model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'),
-                                                            pretrained=version, )
+                                                            pretrained=version, local_files_only=True)
         del model.transformer
         self.model = model
         # self.mapper = torch.nn.Linear(1280, 1024)
@@ -301,7 +302,7 @@ class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
                  freeze=True, layer="pooled", antialias=True):
         super().__init__()
         model, _, _ = open_clip.create_model_and_transforms(arch, device=torch.device('cpu'),
-                                                            pretrained=version, )
+                                                            pretrained=version)
         del model.transformer
         self.model = model
         self.device = device

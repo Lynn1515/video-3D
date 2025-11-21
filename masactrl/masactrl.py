@@ -119,11 +119,11 @@ class VideoSelfAttentionControl(AttentionBase):
         
         slice_len = (q.shape[0] // b)  # t * h
         # efficient attention
-        out = self.efficient_attn(q, k, v, num_heads=num_heads, b=b)#[:slice_len]
+        out = self.efficient_attn(q, k[slice_len:], v[slice_len:], num_heads=num_heads, b=b)#[:slice_len]
         #out = self.efficient_attn(q, k, v,num_heads=num_heads, b=b)
         out_ip = None
         if k_ip is not None and v_ip is not None:
-            out_ip = self.efficient_attn(q, k_ip, v_ip, num_heads=num_heads, b=b)
+            out_ip = self.efficient_attn(q, k_ip[slice_len:], v_ip[slice_len:], num_heads=num_heads, b=b)
             #out_ip = self.efficient_attn(q, k_ip[slice_len:], v_ip[slice_len:], num_heads=num_heads, b=b)
         #out_c = self.efficient_attn(qc, kc[:slice_len], vc[:slice_len])
         return out, out_ip#torch.cat([out_u, out_c], dim=0)
